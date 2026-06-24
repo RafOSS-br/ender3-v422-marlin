@@ -1,0 +1,266 @@
+name: Build & Release Firmware
+
+# Builds the release assets (firmware .bin files) for the Ender-3 / Creality V4.2.2.
+# - Versioned by the Marlin version (the release tag == Marlin version).
+# - Matrix: languages (pt_br, en, ...) x manual mesh (5x5, 7x7, ...).
+# - Trigger: manual (workflow_dispatch) or scheduled (detects new Marlin release).
+
+on:
+  workflow_dispatch:
+    inputs:
+      marlin_version:
+        description: "Marlin version (empty = latest stable release)"
+        required: false
+        default: ""
+      languages:
+        description: "Languages (Marlin codes) comma-separated"
+        required: false
+        default: "pt_br,en"
+      profiles:
+        description: "Build profiles comma-separated (default | meshNxN)"
+        required: false
+        default: "default,mesh5x5,mesh7x7"
+      force:
+        description: "Re-publish even if the release already exists"
+        type: boolean
+        default: false
+  schedule:
+    # Every Monday 06:00 UTC: check whether there is a new stable Marlin release.
+    - cron: "0 6 * * 1"
+
+permissions:
+  contents: write          # create tags and releases
+
+# Avoid concurrent runs for the same Marlin version.
+concurrency:
+  group: release-${{ github.workflow }}
+  cancel-in-progress: false
+
+env:
+  PIO_ENV: STM32F103RE_creality   # STM32F103RET6 (512K)
+  BOARD: BOARD_CREALITY_V422
+  MACHINE_NAME: Ender-3
+  PIO_VERSION: "6.1.16"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1) Resolve the Marlin version, build the matrix and decide whether to build.
+  # ---------------------------------------------------------------------------
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+      config_tag: ${{ steps.ver.outputs.config_tag }}
+      matrix: ${{ steps.mat.outputs.matrix }}
+      should_build: ${{ steps.gate.outputs.should_build }}
+    steps:
+      - name: Resolve Marlin version + Configurations tag
+        id: ver
+        env:
+          IN_VER: ${{ inputs.marlin_version }}
+        run: |
+          set -euo pipefail
+          VER="$IN_VER"
+          if [ -z "$VER" ]; then
+            VER="$(curl -fsSL https://api.github.com/repos/MarlinFirmware/Marlin/releases/latest | jq -r .tag_name)"
+          fi
+          echo "Marlin: $VER"
+          # Configurations: use the release-<ver> tag; fall back to latest-2.1.x if missing.
+          CT="release-${VER}"
+          if ! curl -fsSL -o /dev/null "https://raw.githubusercontent.com/MarlinFirmware/Configurations/${CT}/README.md"; then
+            CT="latest-2.1.x"
+          fi
+          echo "Configurations: $CT"
+          echo "version=$VER"     >> "$GITHUB_OUTPUT"
+          echo "config_tag=$CT"   >> "$GITHUB_OUTPUT"
+
+      - name: Build language x profile matrix
+        id: mat
+        env:
+          LANGS: ${{ inputs.languages || 'pt_br,en' }}
+          PROFILES: ${{ inputs.profiles || 'default,mesh5x5,mesh7x7' }}
+        run: |
+          set -euo pipefail
+          python3 - "$LANGS" "$PROFILES" <<'PY' >> "$GITHUB_OUTPUT"
+          import json, re, sys
+          langs = [x.strip() for x in sys.argv[1].split(',') if x.strip()]
+          profiles = [x.strip() for x in sys.argv[2].split(',') if x.strip()]
+          def parse(p):
+              if p == "default":
+                  return {"leveling": "none", "grid": 0}
+              m = re.fullmatch(r"mesh(\d+)x(\d+)", p)
+              if m and m.group(1) == m.group(2):
+                  return {"leveling": "manual_mesh", "grid": int(m.group(1))}
+              raise SystemExit(f"invalid profile: {p!r} (use 'default' or 'meshNxN')")
+          inc = [{"language": l, "profile": p, **parse(p)} for l in langs for p in profiles]
+          print("matrix=" + json.dumps({"include": inc}))
+          PY
+          cat "$GITHUB_OUTPUT"
+
+      - name: Check whether the release already exists (idempotency)
+        id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VER: ${{ steps.ver.outputs.version }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          set -euo pipefail
+          if [ "$FORCE" = "true" ]; then
+            echo "force=on -> build"; echo "should_build=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          if gh release view "$VER" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $VER already exists -> skipping."
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Release $VER does not exist -> build."
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ---------------------------------------------------------------------------
+  # 2) Prepare ONCE: clone Marlin + download configs + warm the toolchain.
+  #    Reused by the whole matrix (clones/downloads are not repeated).
+  # ---------------------------------------------------------------------------
+  prepare:
+    needs: resolve
+    if: needs.resolve.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install "platformio==${PIO_VERSION}"
+
+      - name: Clone Marlin + download configs (only once)
+        env:
+          MARLIN_TAG: ${{ needs.resolve.outputs.version }}
+          CONFIG_TAG: ${{ needs.resolve.outputs.config_tag }}
+          MARLIN_DIR: ${{ github.workspace }}/Marlin
+        run: bash scripts/fetch-marlin.sh
+
+      - name: PlatformIO cache (platform + ARM toolchain)
+        uses: actions/cache@v4
+        with:
+          path: ~/.platformio
+          key: pio-${{ needs.resolve.outputs.version }}-${{ hashFiles('Marlin/ini/**', 'Marlin/platformio.ini') }}
+
+      - name: Warm the toolchain (single download, no compile)
+        working-directory: Marlin
+        run: pio pkg install -e "${PIO_ENV}"
+
+      - name: Pack source for reuse (without .git/.pio)
+        run: tar -C "${GITHUB_WORKSPACE}" -czf marlin-src.tgz --exclude='Marlin/.git' --exclude='Marlin/.pio' Marlin
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: marlin-src
+          path: marlin-src.tgz
+          retention-days: 1
+
+  # ---------------------------------------------------------------------------
+  # 3) Build the matrix: each cell = (language, mesh). Reuses source + cache.
+  # ---------------------------------------------------------------------------
+  build:
+    needs: [resolve, prepare]
+    if: needs.resolve.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.resolve.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install "platformio==${PIO_VERSION}"
+
+      - name: Restore prepared source (reuse clone/downloads)
+        uses: actions/download-artifact@v4
+        with:
+          name: marlin-src
+      - run: tar -xzf marlin-src.tgz
+
+      - name: Restore PlatformIO cache (toolchain already warmed)
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.platformio
+          key: pio-${{ needs.resolve.outputs.version }}-${{ hashFiles('Marlin/ini/**', 'Marlin/platformio.ini') }}
+
+      - name: Apply config (${{ matrix.language }}, ${{ matrix.profile }})
+        env:
+          MARLIN_DIR: ${{ github.workspace }}/Marlin
+          LCD_LANG: ${{ matrix.language }}
+          LEVELING: ${{ matrix.leveling }}
+          MESH_GRID: ${{ matrix.grid }}
+          MOTHERBOARD: ${{ env.BOARD }}
+          MACHINE_NAME: ${{ env.MACHINE_NAME }}
+        run: bash scripts/apply-config.sh
+
+      - name: Compile firmware
+        env:
+          MARLIN_DIR: ${{ github.workspace }}/Marlin
+          OUT_BIN: ${{ github.workspace }}/dist/Ender3-V422_Marlin-${{ needs.resolve.outputs.version }}_${{ matrix.language }}_${{ matrix.profile }}.bin
+        run: |
+          set -euo pipefail
+          bash scripts/compile.sh
+          # Per-file checksum, same name + .sha256 (self-contained per asset).
+          ( cd dist && for f in *.bin; do sha256sum "$f" > "$f.sha256"; done )
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fw-${{ matrix.language }}-${{ matrix.profile }}
+          path: |
+            dist/*.bin
+            dist/*.sha256
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # 4) Publish the release with all .bin files + checksums.
+  # ---------------------------------------------------------------------------
+  release:
+    needs: [resolve, build]
+    if: needs.resolve.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all firmwares
+        uses: actions/download-artifact@v4
+        with:
+          pattern: fw-*
+          path: dist
+          merge-multiple: true
+
+      - name: Generate release notes
+        working-directory: dist
+        env:
+          VER: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          {
+            echo "Marlin **${VER}** firmware for the **Ender-3 / Creality V4.2.2** (STM32F103RET6)."
+            echo ""
+            echo "- 12864 / knob display (CR10_STOCKDISPLAY)"
+            echo "- Stock bootloader compatible (offset 0x7000)"
+            echo "- \`default\` = no bed compensation; \`meshNxN\` = manual mesh bed leveling (no probe)"
+            echo ""
+            echo "### Variants"
+            for f in *.bin; do echo "- \`$f\`"; done
+            echo ""
+            echo "Each \`.bin\` ships its own \`.bin.sha256\`. Verify with: \`sha256sum -c <file>.bin.sha256\`."
+            echo ""
+            echo "**Install:** copy the \`.bin\` to an empty FAT32 microSD, insert it with the printer off and power on. Use a new file name for each flash."
+          } > NOTES.md
+
+      - name: Create/update release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VER: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          if gh release view "$VER" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$VER" -R "$GITHUB_REPOSITORY" --clobber dist/*.bin dist/*.sha256
+          else
+            gh release create "$VER" -R "$GITHUB_REPOSITORY" \
+              --title "Ender-3 V4.2.2 — Marlin $VER" \
+              --notes-file dist/NOTES.md \
+              dist/*.bin dist/*.sha256
+          fi
