@@ -15,7 +15,7 @@ on:
       languages:
         description: "Languages (Marlin codes) comma-separated"
         required: false
-        default: "pt_br,en"
+        default: "en,pt_br,de,es,fr"
       profiles:
         description: "Build profiles comma-separated (default | meshNxN)"
         required: false
@@ -77,7 +77,7 @@ jobs:
       - name: Build language x profile matrix
         id: mat
         env:
-          LANGS: ${{ inputs.languages || 'pt_br,en' }}
+          LANGS: ${{ inputs.languages || 'en,pt_br,de,es,fr' }}
           PROFILES: ${{ inputs.profiles || 'default,mesh5x5,mesh7x7' }}
         run: |
           set -euo pipefail

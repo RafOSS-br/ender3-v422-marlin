@@ -107,24 +107,24 @@ A **profile** is the leveling axis of the matrix:
 - Parallel matrix with `fail-fast: false` (a broken variant does not take the others down).
 
 ### Output
-With the defaults (`languages: pt_br,en` × `profiles: default,mesh5x5,mesh7x7`) that is
-**2 × 3 = 6 variants**. Each `.bin` ships its own `.bin.sha256` (same name), so the
-release has **6 `.bin` + 6 `.sha256` = 12 assets**:
+With the defaults (`languages: en,pt_br,de,es,fr` × `profiles: default,mesh5x5,mesh7x7`)
+that is **5 × 3 = 15 variants**. Each `.bin` ships its own `.bin.sha256` (same name), so
+the release has **15 `.bin` + 15 `.sha256` = 30 assets**, e.g.:
 ```
-Ender3-V422_Marlin-2.1.2.7_pt_br_default.bin    (+ .bin.sha256)
-Ender3-V422_Marlin-2.1.2.7_pt_br_mesh5x5.bin    (+ .bin.sha256)
-Ender3-V422_Marlin-2.1.2.7_pt_br_mesh7x7.bin    (+ .bin.sha256)
 Ender3-V422_Marlin-2.1.2.7_en_default.bin       (+ .bin.sha256)
 Ender3-V422_Marlin-2.1.2.7_en_mesh5x5.bin       (+ .bin.sha256)
 Ender3-V422_Marlin-2.1.2.7_en_mesh7x7.bin       (+ .bin.sha256)
+Ender3-V422_Marlin-2.1.2.7_pt_br_default.bin    (+ .bin.sha256)
+Ender3-V422_Marlin-2.1.2.7_pt_br_mesh5x5.bin    (+ .bin.sha256)
+... (de, es, fr × default/mesh5x5/mesh7x7)
 ```
 Verify one with: `sha256sum -c <file>.bin.sha256`.
 
 ### Adding languages/profiles
-On the manual trigger, fill in `languages` (e.g. `pt_br,en,de,es`) and `profiles`
+On the manual trigger, fill in `languages` (e.g. `en,pt_br,de,es,fr,it`) and `profiles`
 (e.g. `default,mesh3x3,mesh5x5,mesh7x7`). The variant count is
-`#languages × #profiles`. Scheduled runs use the defaults `pt_br,en` ×
-`default,mesh5x5,mesh7x7`.
+`#languages × #profiles`. Scheduled (periodic) runs use the defaults
+`en,pt_br,de,es,fr` × `default,mesh5x5,mesh7x7`.
 
 ---
 
